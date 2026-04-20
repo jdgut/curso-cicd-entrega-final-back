@@ -21,7 +21,7 @@ acceptance_coverage.xml
 *.md
 sonar-project.properties
 pytest.ini
-frontend/node_modules/
-frontend/dist/
-frontend/coverage/
-backend/test.db
+node_modules/
+dist/
+coverage/
+test.db

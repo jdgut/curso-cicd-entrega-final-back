@@ -3,8 +3,6 @@ venv/
 env/
 .venv/
 .env
-backend/.env
-frontend/.env
 
 # python
 *.pyc
@@ -27,9 +25,5 @@ acceptance_coverage.xml
 .vscode/
 
 
-frontend/node_modules/
-frontend/dist/
-frontend/coverage/
-
-backend/test.db
+test.db
 
