@@ -1,0 +1,27 @@
+# .dockerignore
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+venv
+env
+.venv
+.env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+htmlcov
+coverage.xml
+report.html
+acceptance_coverage.xml
+.vscode
+*.md
+sonar-project.properties
+pytest.ini
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+backend/test.db
