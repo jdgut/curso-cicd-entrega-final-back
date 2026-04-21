@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    container_name: cicd-backend
+    environment:
+      APP_DATABASE_URL: ${APP_DATABASE_URL}
+#    ports:
+#      - "8000:8000"
+    networks:
+      - cicd-network
+
+networks:
+  cicd-network:
+    name: cicd-network
