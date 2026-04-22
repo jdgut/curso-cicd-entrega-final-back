@@ -49,6 +49,7 @@ async def lifespan(_: FastAPI):
     seed_demo_users()
     yield
 
+
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(

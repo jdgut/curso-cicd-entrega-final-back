@@ -64,7 +64,9 @@ class Trip(Base):
     direction: Mapped[TripDirection] = mapped_column(SQLEnum(TripDirection), nullable=False)
     state: Mapped[TripState] = mapped_column(SQLEnum(TripState), nullable=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Python 3.14 + SQLAlchemy 2.0.35 can fail when parsing union annotations here.
+    # Keep the column nullable while avoiding a union type in the ORM annotation.
+    finalized_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
     creator_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     creator: Mapped[User] = relationship(back_populates="created_trips")

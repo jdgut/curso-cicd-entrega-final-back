@@ -12,9 +12,7 @@ class TripRepository:
 
     def get(self, trip_id: int) -> Trip | None:
         query = (
-            select(Trip)
-            .where(Trip.id == trip_id)
-            .options(joinedload(Trip.participants).joinedload(TripParticipant.user), joinedload(Trip.creator))
+            select(Trip).where(Trip.id == trip_id).options(joinedload(Trip.participants).joinedload(TripParticipant.user), joinedload(Trip.creator))
         )
         return self.db.scalar(query)
 

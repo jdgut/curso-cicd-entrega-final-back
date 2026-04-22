@@ -20,7 +20,6 @@ acceptance_coverage.xml
 .vscode
 *.md
 sonar-project.properties
-pytest.ini
 node_modules/
 dist/
 coverage/
