@@ -1,0 +1,18 @@
+Abrir módulo y ejecutar laboratorio
+Copiar información de CLI
+Pegar información de CLI en archivo .aws/credentials en el perfil [curso_cicd]
+Ejecutar "aws configure --profile curso_cicd"
+Enter en los valores que ya existan. Configurar los que falten: Formato JSON y región us-east-1
+
+
+Configurar los secretos y variables en GitHub.
+ - obtener el Arn del labrole: arn:aws:iam::855240645828:role/LabRole
+ - obtener el id de la VPC: vpc-024fd22712bbaf826
+  - obtener el id de la subred: subnet-0b9ace78ab74141df y subnet-0abf9bdd82901012b
++ AWS_ACCESS_KEY_ID
++ AWS_SECRET_ACCESS_KEY
++ AWS_SESSION_TOKEN
+- LAB_ROLE_ARN
+- VPC_ID
+- SUBNET_IDS (valores separados por coma)
+- TF_STATE_BUCKET: curso-cicd-tfstate-jdgut-753159
