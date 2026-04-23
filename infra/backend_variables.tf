@@ -37,7 +37,11 @@ variable "app_database_url" {
 variable "app_cors_allowed_origins" {
   description = "Valor para APP_CORS_ALLOWED_ORIGINS en el contenedor."
   type        = string
-  default     = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080"
+
+  validation {
+    condition     = length(trimspace(var.app_cors_allowed_origins)) > 0
+    error_message = "app_cors_allowed_origins no puede estar vacia. Define dominios reales del frontend (o '*' si aplica)."
+  }
 }
 
 variable "backend_extra_environment" {

@@ -11,6 +11,9 @@ subnet_ids   = ["subnet-aaaaaaaa", "subnet-bbbbbbbb"]
 aws_region = "us-east-1"
 
 # BD fuera de alcance en esta iteracion: proveer URL externa o existente
-app_database_url = "postgresql+psycopg2://user:password@host:5432/database"
+app_database_url = "postgresql+psycopg://postgres:postgres@cicd-db:5432/movilidad"
+
+# Origen(es) permitidos para CORS en staging (separados por coma, sin slash final)
+app_cors_allowed_origins = "https://staging-frontend.example.com,http://localhost:5173"
 
 desired_count = 1
