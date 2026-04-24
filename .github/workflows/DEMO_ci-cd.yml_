@@ -1,0 +1,828 @@
+name: Database CI/CD
+
+on:
+  push:
+    branches:
+      - development
+      - main
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Environment to operate on (destroy/unlock)"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+          - all
+      confirm_destroy:
+        description: "Type DESTROY to confirm"
+        required: false
+        type: string
+      confirm_unlock:
+        description: "Type UNLOCK to remove Terraform state lock"
+        required: false
+        type: string
+      lock_id:
+        description: "Optional lock ID (from Terraform error) to guard unlock"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-test-publish:
+    name: Build, Test and Publish Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.head_ref == 'development')
+    outputs:
+      image_repo: ${{ steps.image_meta.outputs.image }}
+      image_tag: ${{ steps.image_meta.outputs.tag }}
+      image_uri: ${{ steps.image_meta.outputs.image }}:${{ steps.image_meta.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile (Hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Lint SQL files (sqlfluff)
+        run: |
+          python -m pip install --upgrade pip
+          pip install sqlfluff
+          sqlfluff lint init --dialect postgres
+
+      - name: Build PostgreSQL image
+        run: docker build -t db-init:test .
+
+      - name: Start PostgreSQL container
+        run: |
+          docker run -d \
+            --name pg-test \
+            -e POSTGRES_DB=testdb \
+            -e POSTGRES_USER=testuser \
+            -e POSTGRES_PASSWORD=testpass \
+            -p 5432:5432 \
+            db-init:test
+
+      - name: Wait for PostgreSQL stable readiness
+        run: |
+          READY_STREAK=0
+          for i in {1..90}; do
+            if docker exec pg-test pg_isready -U testuser -d testdb >/dev/null 2>&1 && \
+               docker exec pg-test psql -U testuser -d testdb -tAc "SELECT 1" >/dev/null 2>&1; then
+              READY_STREAK=$((READY_STREAK + 1))
+              echo "Readiness check passed ($READY_STREAK/3)"
+              if [ "$READY_STREAK" -ge 3 ]; then
+                echo "PostgreSQL is stably ready"
+                break
+              fi
+            else
+              READY_STREAK=0
+            fi
+            sleep 2
+          done
+
+          if [ "$READY_STREAK" -lt 3 ]; then
+            echo "PostgreSQL did not reach stable readiness in time"
+            docker logs pg-test
+            exit 1
+          fi
+
+      - name: Verify initialization scripts
+        run: |
+          run_query_with_retry() {
+            local query="$1"
+            for i in {1..10}; do
+              if docker exec pg-test psql -U testuser -d testdb -v ON_ERROR_STOP=1 -c "$query"; then
+                return 0
+              fi
+              echo "Query failed, retrying in 2s ($i/10)..."
+              sleep 2
+            done
+            return 1
+          }
+
+          run_query_with_retry "SELECT 1;"
+          run_query_with_retry "SELECT extname FROM pg_extension WHERE extname = 'uuid-ossp';"
+
+      - name: Security scan (Trivy, informational)
+        uses: aquasecurity/trivy-action@v0.36.0
+        continue-on-error: true
+        with:
+          image-ref: db-init:test
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          ignore-unfixed: true
+
+      - name: Sonar scan
+        if: github.ref == 'refs/heads/main'
+        uses: SonarSource/sonarqube-scan-action@v5.0.0
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+
+      - name: Determine image tag
+        id: image_meta
+        shell: bash
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          REPO_NAME="$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]')"
+
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            TAG="latest"
+          else
+            TAG="dev"
+          fi
+
+          echo "image=${{ vars.DOCKERHUB_USERNAME }}/$REPO_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && (github.ref_name == 'development' || github.ref_name == 'main')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        if: github.event_name == 'push' && (github.ref_name == 'development' || github.ref_name == 'main')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.image_meta.outputs.image }}:${{ steps.image_meta.outputs.tag }}
+
+      - name: Cleanup test container
+        if: always()
+        run: docker rm -f pg-test || true
+
+  deploy-tf-staging:
+    name: Deploy Terraform Staging
+    needs: build-test-publish
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    outputs:
+      database_endpoint: ${{ steps.tf_outputs.outputs.database_endpoint }}
+      cluster_name: ${{ steps.tf_outputs.outputs.cluster_name }}
+      service_name: ${{ steps.tf_outputs.outputs.service_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+          terraform_wrapper: false
+
+      - name: Terraform Init (Staging)
+        working-directory: infra
+        shell: bash
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=database/staging/terraform.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="dynamodb_table=terraform-state-locks"
+
+      - name: Terraform Apply (Staging)
+        working-directory: infra
+        shell: bash
+        env:
+          IMAGE_URI: ${{ needs.build-test-publish.outputs.image_uri }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${IMAGE_URI}" ]; then
+            echo "IMAGE_URI is empty; build-test-publish output was not produced."
+            exit 1
+          fi
+
+          if [ -z "${POSTGRES_DB:-}" ] || [ -z "${POSTGRES_USER:-}" ] || [ -z "${POSTGRES_PASSWORD:-}" ]; then
+            echo "POSTGRES_DB, POSTGRES_USER and POSTGRES_PASSWORD must be non-empty."
+            exit 1
+          fi
+
+          SUBNET_LIST=$(echo "${{ vars.SUBNET_IDS }}" | awk -F',' '{printf "["; for(i=1;i<=NF;i++){gsub(/^ +| +$/, "", $i); printf "\"%s\"%s",$i,(i<NF?",":"")}; printf "]"}')
+
+          terraform apply -auto-approve \
+            -var="environment_name=staging" \
+            -var="aws_region=us-east-1" \
+            -var="docker_image_uri=${IMAGE_URI}" \
+            -var="lab_role_arn=${{ vars.LAB_ROLE_ARN }}" \
+            -var="vpc_id=${{ vars.VPC_ID }}" \
+            -var="subnet_ids=${SUBNET_LIST}" \
+            -var="postgres_db=${POSTGRES_DB}" \
+            -var="postgres_user=${POSTGRES_USER}" \
+            -var="postgres_password=${POSTGRES_PASSWORD}" \
+            -var="task_cpu=512" \
+            -var="task_memory=1024" \
+            -var="desired_count=1"
+
+      - name: Get Terraform Outputs (Staging)
+        id: tf_outputs
+        working-directory: infra
+        run: |
+          echo "database_endpoint=$(terraform output -raw database_endpoint)" >> "$GITHUB_OUTPUT"
+          echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "service_name=$(terraform output -raw ecs_service_name)" >> "$GITHUB_OUTPUT"
+
+  update-service-staging:
+    name: Update Service Staging
+    needs: deploy-tf-staging
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Force New Deployment ECS Service Staging
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLUSTER="${{ needs.deploy-tf-staging.outputs.cluster_name }}"
+          SERVICE="${{ needs.deploy-tf-staging.outputs.service_name }}"
+
+          print_service_diagnostics() {
+            echo "==== ECS Service Description ===="
+            aws ecs describe-services \
+              --cluster "$CLUSTER" \
+              --services "$SERVICE" \
+              --region us-east-1 \
+              --output json
+
+            echo "==== Recent ECS Service Events ===="
+            aws ecs describe-services \
+              --cluster "$CLUSTER" \
+              --services "$SERVICE" \
+              --region us-east-1 \
+              --query 'services[0].events[0:15].[createdAt,message]' \
+              --output table || true
+
+            for STATUS in RUNNING STOPPED; do
+              TASK_ARNS=$(aws ecs list-tasks \
+                --cluster "$CLUSTER" \
+                --service-name "$SERVICE" \
+                --desired-status "$STATUS" \
+                --region us-east-1 \
+                --query 'taskArns' \
+                --output text || true)
+
+              if [ -n "${TASK_ARNS:-}" ] && [ "$TASK_ARNS" != "None" ]; then
+                echo "==== ECS Tasks ($STATUS) ===="
+                aws ecs describe-tasks \
+                  --cluster "$CLUSTER" \
+                  --tasks $TASK_ARNS \
+                  --region us-east-1 \
+                  --query 'tasks[].{taskArn:taskArn,lastStatus:lastStatus,desiredStatus:desiredStatus,stopCode:stopCode,stoppedReason:stoppedReason,containerReason:containers[0].reason,exitCode:containers[0].exitCode}' \
+                  --output table || true
+              fi
+            done
+          }
+
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --force-new-deployment \
+            --region us-east-1
+
+          MAX_SECONDS=1800
+          INTERVAL=15
+          ELAPSED=0
+
+          while [ "$ELAPSED" -lt "$MAX_SECONDS" ]; do
+            DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'services[0].desiredCount' --output text)
+            RUNNING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'services[0].runningCount' --output text)
+            PENDING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'services[0].pendingCount' --output text)
+            FAILED_DEPLOYMENTS=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'length(services[0].deployments[?rolloutState==`FAILED`])' --output text)
+
+            echo "[$ELAPSED s] desired=$DESIRED running=$RUNNING pending=$PENDING failed_deployments=$FAILED_DEPLOYMENTS"
+
+            if [ "$FAILED_DEPLOYMENTS" -gt 0 ]; then
+              echo "Deployment entered FAILED rollout state."
+              print_service_diagnostics
+              exit 1
+            fi
+
+            if [ "$RUNNING" -eq "$DESIRED" ] && [ "$PENDING" -eq 0 ]; then
+              echo "Service reached steady state."
+              exit 0
+            fi
+
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "Timed out waiting for service steady state."
+          print_service_diagnostics
+          exit 1
+
+  test-staging:
+    name: Test Staging
+    needs: [build-test-publish, deploy-tf-staging, update-service-staging]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Validate ECS service and target health (Staging)
+        shell: bash
+        env:
+          CLUSTER: ${{ needs.deploy-tf-staging.outputs.cluster_name }}
+          SERVICE: ${{ needs.deploy-tf-staging.outputs.service_name }}
+          EXPECTED_IMAGE: ${{ needs.build-test-publish.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          print_target_health() {
+            aws elbv2 describe-target-health \
+              --target-group-arn "$TARGET_GROUP_ARN" \
+              --query 'TargetHealthDescriptions[].{target:Target.Id,state:TargetHealth.State,reason:TargetHealth.Reason,description:TargetHealth.Description}' \
+              --output table || true
+          }
+
+          DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].desiredCount' --output text)
+          RUNNING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].runningCount' --output text)
+          TASK_DEF_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].taskDefinition' --output text)
+          DEPLOYED_IMAGE=$(aws ecs describe-task-definition --task-definition "$TASK_DEF_ARN" --query 'taskDefinition.containerDefinitions[0].image' --output text)
+          TARGET_GROUP_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].loadBalancers[0].targetGroupArn' --output text)
+
+          HEALTHY_COUNT=0
+          MAX_SECONDS=600
+          INTERVAL=15
+          ELAPSED=0
+
+          while [ "$ELAPSED" -lt "$MAX_SECONDS" ]; do
+            HEALTHY_COUNT=$(aws elbv2 describe-target-health --target-group-arn "$TARGET_GROUP_ARN" --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' --output text)
+            echo "[$ELAPSED s] Healthy targets: $HEALTHY_COUNT"
+            if [ "$HEALTHY_COUNT" -ge 1 ]; then
+              break
+            fi
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "Desired tasks: $DESIRED"
+          echo "Running tasks: $RUNNING"
+          echo "Expected image: $EXPECTED_IMAGE"
+          echo "Deployed image: $DEPLOYED_IMAGE"
+          echo "Healthy targets: $HEALTHY_COUNT"
+
+          [ "$RUNNING" -ge 1 ] || (echo "No running tasks in staging" && exit 1)
+          [ "$RUNNING" -eq "$DESIRED" ] || (echo "Running count does not match desired count" && exit 1)
+          [ "$DEPLOYED_IMAGE" = "$EXPECTED_IMAGE" ] || (echo "Staging is not running expected image" && exit 1)
+          if [ "$HEALTHY_COUNT" -lt 1 ]; then
+            echo "No healthy targets registered in staging after waiting ${MAX_SECONDS}s"
+            print_target_health
+            exit 1
+          fi
+
+  deploy-tf-prod:
+    name: Deploy Terraform Production
+    needs: [build-test-publish, test-staging]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    outputs:
+      database_endpoint: ${{ steps.tf_outputs.outputs.database_endpoint }}
+      cluster_name: ${{ steps.tf_outputs.outputs.cluster_name }}
+      service_name: ${{ steps.tf_outputs.outputs.service_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+          terraform_wrapper: false
+
+      - name: Terraform Init (Production)
+        working-directory: infra
+        shell: bash
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=database/production/terraform.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="dynamodb_table=terraform-state-locks"
+
+      - name: Terraform Apply (Production)
+        working-directory: infra
+        shell: bash
+        env:
+          IMAGE_URI: ${{ needs.build-test-publish.outputs.image_uri }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${IMAGE_URI}" ]; then
+            echo "IMAGE_URI is empty; build-test-publish output was not produced."
+            exit 1
+          fi
+
+          if [ -z "${POSTGRES_DB:-}" ] || [ -z "${POSTGRES_USER:-}" ] || [ -z "${POSTGRES_PASSWORD:-}" ]; then
+            echo "POSTGRES_DB, POSTGRES_USER and POSTGRES_PASSWORD must be non-empty."
+            exit 1
+          fi
+
+          SUBNET_LIST=$(echo "${{ vars.SUBNET_IDS }}" | awk -F',' '{printf "["; for(i=1;i<=NF;i++){gsub(/^ +| +$/, "", $i); printf "\"%s\"%s",$i,(i<NF?",":"")}; printf "]"}')
+
+          terraform apply -auto-approve \
+            -var="environment_name=production" \
+            -var="aws_region=us-east-1" \
+            -var="docker_image_uri=${IMAGE_URI}" \
+            -var="lab_role_arn=${{ vars.LAB_ROLE_ARN }}" \
+            -var="vpc_id=${{ vars.VPC_ID }}" \
+            -var="subnet_ids=${SUBNET_LIST}" \
+            -var="postgres_db=${POSTGRES_DB}" \
+            -var="postgres_user=${POSTGRES_USER}" \
+            -var="postgres_password=${POSTGRES_PASSWORD}" \
+            -var="task_cpu=1024" \
+            -var="task_memory=2048" \
+            -var="desired_count=1"
+
+      - name: Get Terraform Outputs (Production)
+        id: tf_outputs
+        working-directory: infra
+        run: |
+          echo "database_endpoint=$(terraform output -raw database_endpoint)" >> "$GITHUB_OUTPUT"
+          echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "service_name=$(terraform output -raw ecs_service_name)" >> "$GITHUB_OUTPUT"
+
+  update-service-prod:
+    name: Update Service Production
+    needs: deploy-tf-prod
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Force New Deployment ECS Service Production
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLUSTER="${{ needs.deploy-tf-prod.outputs.cluster_name }}"
+          SERVICE="${{ needs.deploy-tf-prod.outputs.service_name }}"
+
+          print_service_diagnostics() {
+            echo "==== ECS Service Description ===="
+            aws ecs describe-services \
+              --cluster "$CLUSTER" \
+              --services "$SERVICE" \
+              --region us-east-1 \
+              --output json
+
+            echo "==== Recent ECS Service Events ===="
+            aws ecs describe-services \
+              --cluster "$CLUSTER" \
+              --services "$SERVICE" \
+              --region us-east-1 \
+              --query 'services[0].events[0:15].[createdAt,message]' \
+              --output table || true
+
+            for STATUS in RUNNING STOPPED; do
+              TASK_ARNS=$(aws ecs list-tasks \
+                --cluster "$CLUSTER" \
+                --service-name "$SERVICE" \
+                --desired-status "$STATUS" \
+                --region us-east-1 \
+                --query 'taskArns' \
+                --output text || true)
+
+              if [ -n "${TASK_ARNS:-}" ] && [ "$TASK_ARNS" != "None" ]; then
+                echo "==== ECS Tasks ($STATUS) ===="
+                aws ecs describe-tasks \
+                  --cluster "$CLUSTER" \
+                  --tasks $TASK_ARNS \
+                  --region us-east-1 \
+                  --query 'tasks[].{taskArn:taskArn,lastStatus:lastStatus,desiredStatus:desiredStatus,stopCode:stopCode,stoppedReason:stoppedReason,containerReason:containers[0].reason,exitCode:containers[0].exitCode}' \
+                  --output table || true
+              fi
+            done
+          }
+
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --force-new-deployment \
+            --region us-east-1
+
+          MAX_SECONDS=1800
+          INTERVAL=15
+          ELAPSED=0
+
+          while [ "$ELAPSED" -lt "$MAX_SECONDS" ]; do
+            DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'services[0].desiredCount' --output text)
+            RUNNING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'services[0].runningCount' --output text)
+            PENDING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'services[0].pendingCount' --output text)
+            FAILED_DEPLOYMENTS=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region us-east-1 --query 'length(services[0].deployments[?rolloutState==`FAILED`])' --output text)
+
+            echo "[$ELAPSED s] desired=$DESIRED running=$RUNNING pending=$PENDING failed_deployments=$FAILED_DEPLOYMENTS"
+
+            if [ "$FAILED_DEPLOYMENTS" -gt 0 ]; then
+              echo "Deployment entered FAILED rollout state."
+              print_service_diagnostics
+              exit 1
+            fi
+
+            if [ "$RUNNING" -eq "$DESIRED" ] && [ "$PENDING" -eq 0 ]; then
+              echo "Service reached steady state."
+              exit 0
+            fi
+
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "Timed out waiting for service steady state."
+          print_service_diagnostics
+          exit 1
+
+  smoke-test-prod:
+    name: Smoke Test Production
+    needs: [build-test-publish, deploy-tf-prod, update-service-prod]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Smoke checks on ECS deployment (Production)
+        shell: bash
+        env:
+          CLUSTER: ${{ needs.deploy-tf-prod.outputs.cluster_name }}
+          SERVICE: ${{ needs.deploy-tf-prod.outputs.service_name }}
+          EXPECTED_IMAGE: ${{ needs.build-test-publish.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          print_target_health() {
+            aws elbv2 describe-target-health \
+              --target-group-arn "$TARGET_GROUP_ARN" \
+              --query 'TargetHealthDescriptions[].{target:Target.Id,state:TargetHealth.State,reason:TargetHealth.Reason,description:TargetHealth.Description}' \
+              --output table || true
+          }
+
+          DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].desiredCount' --output text)
+          RUNNING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].runningCount' --output text)
+          TASK_DEF_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].taskDefinition' --output text)
+          DEPLOYED_IMAGE=$(aws ecs describe-task-definition --task-definition "$TASK_DEF_ARN" --query 'taskDefinition.containerDefinitions[0].image' --output text)
+          TARGET_GROUP_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].loadBalancers[0].targetGroupArn' --output text)
+
+          HEALTHY_COUNT=0
+          MAX_SECONDS=600
+          INTERVAL=15
+          ELAPSED=0
+
+          while [ "$ELAPSED" -lt "$MAX_SECONDS" ]; do
+            HEALTHY_COUNT=$(aws elbv2 describe-target-health --target-group-arn "$TARGET_GROUP_ARN" --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' --output text)
+            echo "[$ELAPSED s] Healthy targets: $HEALTHY_COUNT"
+            if [ "$HEALTHY_COUNT" -ge 1 ]; then
+              break
+            fi
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "Desired tasks: $DESIRED"
+          echo "Running tasks: $RUNNING"
+          echo "Expected image: $EXPECTED_IMAGE"
+          echo "Deployed image: $DEPLOYED_IMAGE"
+          echo "Healthy targets: $HEALTHY_COUNT"
+
+          [ "$RUNNING" -ge 1 ] || (echo "No running tasks in production" && exit 1)
+          [ "$RUNNING" -eq "$DESIRED" ] || (echo "Running count does not match desired count" && exit 1)
+          [ "$DEPLOYED_IMAGE" = "$EXPECTED_IMAGE" ] || (echo "Production is not running expected image" && exit 1)
+          if [ "$HEALTHY_COUNT" -lt 1 ]; then
+            echo "No healthy targets registered in production after waiting ${MAX_SECONDS}s"
+            print_target_health
+            exit 1
+          fi
+
+  cleanup-environment:
+    name: Manual Cleanup (Terraform Destroy)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_destroy == 'DESTROY'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+          terraform_wrapper: false
+
+      - name: Run Terraform Destroy (selected environment)
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.target_environment }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          REPO_NAME="$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]')"
+          IMAGE_URI="${{ vars.DOCKERHUB_USERNAME }}/$REPO_NAME:latest"
+
+          SUBNET_LIST=$(echo "${{ vars.SUBNET_IDS }}" | awk -F',' '{printf "["; for(i=1;i<=NF;i++){gsub(/^ +| +$/, "", $i); printf "\"%s\"%s",$i,(i<NF?",":"")}; printf "]"}')
+
+          if [[ "$TARGET_ENVIRONMENT" == "all" ]]; then
+            ENVIRONMENTS=("staging" "production")
+          else
+            ENVIRONMENTS=("$TARGET_ENVIRONMENT")
+          fi
+
+          for ENV_NAME in "${ENVIRONMENTS[@]}"; do
+            if [[ "$ENV_NAME" == "staging" ]]; then
+              TASK_CPU="512"
+              TASK_MEMORY="1024"
+              BACKEND_KEY="database/staging/terraform.tfstate"
+            else
+              TASK_CPU="1024"
+              TASK_MEMORY="2048"
+              BACKEND_KEY="database/production/terraform.tfstate"
+            fi
+
+            echo "Starting destroy for environment: $ENV_NAME"
+
+            terraform -chdir=infra init -reconfigure \
+              -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+              -backend-config="key=${BACKEND_KEY}" \
+              -backend-config="region=us-east-1" \
+              -backend-config="dynamodb_table=terraform-state-locks"
+
+            terraform -chdir=infra destroy -auto-approve -lock-timeout=10m \
+              -var="environment_name=${ENV_NAME}" \
+              -var="aws_region=us-east-1" \
+              -var="docker_image_uri=${IMAGE_URI}" \
+              -var="lab_role_arn=${{ vars.LAB_ROLE_ARN }}" \
+              -var="vpc_id=${{ vars.VPC_ID }}" \
+              -var="subnet_ids=${SUBNET_LIST}" \
+              -var="postgres_db=${POSTGRES_DB}" \
+              -var="postgres_user=${POSTGRES_USER}" \
+              -var="postgres_password=${POSTGRES_PASSWORD}" \
+              -var="task_cpu=${TASK_CPU}" \
+              -var="task_memory=${TASK_MEMORY}" \
+              -var="desired_count=1"
+
+            echo "Destroy completed for environment: $ENV_NAME"
+          done
+
+  unlock-state:
+    name: Manual Unlock (Terraform State Lock)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_unlock == 'UNLOCK'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Remove Terraform lock item (selected environment)
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.target_environment }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          LOCK_ID: ${{ github.event.inputs.lock_id }}
+        run: |
+          set -euo pipefail
+
+          TABLE_NAME="terraform-state-locks"
+
+          if [[ -n "${LOCK_ID:-}" ]]; then
+            echo "Using guarded unlock with lock ID: ${LOCK_ID}"
+          else
+            echo "No lock_id provided. Unlock will delete existing lock item by path only."
+          fi
+
+          if [[ "$TARGET_ENVIRONMENT" == "all" ]]; then
+            ENVIRONMENTS=("staging" "production")
+          else
+            ENVIRONMENTS=("$TARGET_ENVIRONMENT")
+          fi
+
+          for ENV_NAME in "${ENVIRONMENTS[@]}"; do
+            if [[ "$ENV_NAME" == "staging" ]]; then
+              BACKEND_KEY="database/staging/terraform.tfstate"
+            else
+              BACKEND_KEY="database/production/terraform.tfstate"
+            fi
+
+            LOCK_PATH="${TF_STATE_BUCKET}/${BACKEND_KEY}"
+            KEY_JSON=$(printf '{"LockID":{"S":"%s"}}' "$LOCK_PATH")
+
+            echo "Checking lock item for: $LOCK_PATH"
+            aws dynamodb get-item \
+              --table-name "$TABLE_NAME" \
+              --key "$KEY_JSON" \
+              --consistent-read \
+              --output json
+
+            if [[ -n "${LOCK_ID:-}" ]]; then
+              VALUE_JSON=$(printf '{":id":{"S":"%s"}}' "$LOCK_ID")
+              aws dynamodb delete-item \
+                --table-name "$TABLE_NAME" \
+                --key "$KEY_JSON" \
+                --condition-expression 'attribute_exists(LockID) AND contains(Info, :id)' \
+                --expression-attribute-values "$VALUE_JSON"
+            else
+              aws dynamodb delete-item \
+                --table-name "$TABLE_NAME" \
+                --key "$KEY_JSON" \
+                --condition-expression 'attribute_exists(LockID)'
+            fi
+
+            echo "Lock removed for: $LOCK_PATH"
+          done

@@ -66,9 +66,15 @@ terraform -chdir=infra init `
 
 terraform -chdir=infra workspace show
 
-cd infra
-terraform plan -var-file staging.tfvars
+terraform -chdir=infra plan `
+    -var-file="staging.tfvars" `
+    -out="staging.tfplan"
 
-terraform apply -var-file staging.tfvars
+terraform -chdir=infra apply `
+    "staging.tfplan"
 
-terraform destroy -var-file staging.tfvars
+
+terraform -chdir=infra destroy `
+    -var-file="staging.tfvars" `
+    -out="staging.tfplan"
+
