@@ -31,6 +31,20 @@ on:
         required: false
         type: string
 
+env:
+  # Set these values directly in this workflow file if you want to manage them as environment variables.
+  # WARNING: APP_DATABASE_URL contains credentials; keeping it here exposes it in repository history.
+  APP_DATABASE_URL_STAGING: ""
+  APP_DATABASE_URL_PRODUCTION: ""
+  APP_CORS_ALLOWED_ORIGINS_STAGING: "http://localhost:5173"
+  APP_CORS_ALLOWED_ORIGINS_PRODUCTION: ""
+  DESIRED_COUNT_STAGING: "1"
+  DESIRED_COUNT_PRODUCTION: "1"
+  TASK_CPU_STAGING: "256"
+  TASK_MEMORY_STAGING: "512"
+  TASK_CPU_PRODUCTION: "256"
+  TASK_MEMORY_PRODUCTION: "512"
+
 jobs:
   build-test-publish:
     name: Build, Test and Publish Image
@@ -171,11 +185,11 @@ jobs:
           LAB_ROLE_ARN: ${{ vars.LAB_ROLE_ARN }}
           VPC_ID: ${{ vars.VPC_ID }}
           SUBNET_IDS_RAW: ${{ vars.SUBNET_IDS }}
-          APP_DATABASE_URL: ${{ secrets['APP_DATABASE_URL_STAGING'] }}
-          APP_CORS_ALLOWED_ORIGINS: ${{ vars['APP_CORS_ALLOWED_ORIGINS_STAGING'] }}
-          DESIRED_COUNT: ${{ vars['DESIRED_COUNT_STAGING'] }}
-          TASK_CPU: ${{ vars['TASK_CPU_STAGING'] }}
-          TASK_MEMORY: ${{ vars['TASK_MEMORY_STAGING'] }}
+          APP_DATABASE_URL: ${{ env.APP_DATABASE_URL_STAGING }}
+          APP_CORS_ALLOWED_ORIGINS: ${{ env.APP_CORS_ALLOWED_ORIGINS_STAGING }}
+          DESIRED_COUNT: ${{ env.DESIRED_COUNT_STAGING }}
+          TASK_CPU: ${{ env.TASK_CPU_STAGING }}
+          TASK_MEMORY: ${{ env.TASK_MEMORY_STAGING }}
         run: |
           set -euo pipefail
 
@@ -190,7 +204,7 @@ jobs:
           fi
 
           if [ -z "${APP_DATABASE_URL:-}" ] || [ -z "${APP_CORS_ALLOWED_ORIGINS:-}" ]; then
-            echo "APP_DATABASE_URL_STAGING secret and APP_CORS_ALLOWED_ORIGINS_STAGING variable are required."
+            echo "APP_DATABASE_URL_STAGING and APP_CORS_ALLOWED_ORIGINS_STAGING workflow env variables are required."
             exit 1
           fi
 
@@ -438,11 +452,11 @@ jobs:
           LAB_ROLE_ARN: ${{ vars.LAB_ROLE_ARN }}
           VPC_ID: ${{ vars.VPC_ID }}
           SUBNET_IDS_RAW: ${{ vars.SUBNET_IDS }}
-          APP_DATABASE_URL: ${{ secrets['APP_DATABASE_URL_PRODUCTION'] }}
-          APP_CORS_ALLOWED_ORIGINS: ${{ vars['APP_CORS_ALLOWED_ORIGINS_PRODUCTION'] }}
-          DESIRED_COUNT: ${{ vars['DESIRED_COUNT_PRODUCTION'] }}
-          TASK_CPU: ${{ vars['TASK_CPU_PRODUCTION'] }}
-          TASK_MEMORY: ${{ vars['TASK_MEMORY_PRODUCTION'] }}
+          APP_DATABASE_URL: ${{ env.APP_DATABASE_URL_PRODUCTION }}
+          APP_CORS_ALLOWED_ORIGINS: ${{ env.APP_CORS_ALLOWED_ORIGINS_PRODUCTION }}
+          DESIRED_COUNT: ${{ env.DESIRED_COUNT_PRODUCTION }}
+          TASK_CPU: ${{ env.TASK_CPU_PRODUCTION }}
+          TASK_MEMORY: ${{ env.TASK_MEMORY_PRODUCTION }}
         run: |
           set -euo pipefail
 
@@ -457,7 +471,7 @@ jobs:
           fi
 
           if [ -z "${APP_DATABASE_URL:-}" ] || [ -z "${APP_CORS_ALLOWED_ORIGINS:-}" ]; then
-            echo "APP_DATABASE_URL_PRODUCTION secret and APP_CORS_ALLOWED_ORIGINS_PRODUCTION variable are required."
+            echo "APP_DATABASE_URL_PRODUCTION and APP_CORS_ALLOWED_ORIGINS_PRODUCTION workflow env variables are required."
             exit 1
           fi
 
@@ -689,16 +703,16 @@ jobs:
           LAB_ROLE_ARN: ${{ vars.LAB_ROLE_ARN }}
           VPC_ID: ${{ vars.VPC_ID }}
           SUBNET_IDS_RAW: ${{ vars.SUBNET_IDS }}
-          APP_DATABASE_URL_STAGING: ${{ secrets['APP_DATABASE_URL_STAGING'] }}
-          APP_DATABASE_URL_PRODUCTION: ${{ secrets['APP_DATABASE_URL_PRODUCTION'] }}
-          APP_CORS_ALLOWED_ORIGINS_STAGING: ${{ vars['APP_CORS_ALLOWED_ORIGINS_STAGING'] }}
-          APP_CORS_ALLOWED_ORIGINS_PRODUCTION: ${{ vars['APP_CORS_ALLOWED_ORIGINS_PRODUCTION'] }}
-          DESIRED_COUNT_STAGING: ${{ vars['DESIRED_COUNT_STAGING'] }}
-          DESIRED_COUNT_PRODUCTION: ${{ vars['DESIRED_COUNT_PRODUCTION'] }}
-          TASK_CPU_STAGING: ${{ vars['TASK_CPU_STAGING'] }}
-          TASK_CPU_PRODUCTION: ${{ vars['TASK_CPU_PRODUCTION'] }}
-          TASK_MEMORY_STAGING: ${{ vars['TASK_MEMORY_STAGING'] }}
-          TASK_MEMORY_PRODUCTION: ${{ vars['TASK_MEMORY_PRODUCTION'] }}
+          APP_DATABASE_URL_STAGING: ${{ env.APP_DATABASE_URL_STAGING }}
+          APP_DATABASE_URL_PRODUCTION: ${{ env.APP_DATABASE_URL_PRODUCTION }}
+          APP_CORS_ALLOWED_ORIGINS_STAGING: ${{ env.APP_CORS_ALLOWED_ORIGINS_STAGING }}
+          APP_CORS_ALLOWED_ORIGINS_PRODUCTION: ${{ env.APP_CORS_ALLOWED_ORIGINS_PRODUCTION }}
+          DESIRED_COUNT_STAGING: ${{ env.DESIRED_COUNT_STAGING }}
+          DESIRED_COUNT_PRODUCTION: ${{ env.DESIRED_COUNT_PRODUCTION }}
+          TASK_CPU_STAGING: ${{ env.TASK_CPU_STAGING }}
+          TASK_CPU_PRODUCTION: ${{ env.TASK_CPU_PRODUCTION }}
+          TASK_MEMORY_STAGING: ${{ env.TASK_MEMORY_STAGING }}
+          TASK_MEMORY_PRODUCTION: ${{ env.TASK_MEMORY_PRODUCTION }}
         run: |
           set -euo pipefail
 
