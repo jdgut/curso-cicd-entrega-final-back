@@ -56,9 +56,9 @@ Important implementation detail from this iteration:
 - The pipeline still overrides docker_image_uri dynamically from the build output.
 
 Current setting choice for backend runtime connection values:
-- APP_DATABASE_URL_STAGING / APP_DATABASE_URL_PRODUCTION are defined as workflow env variables in .github/workflows/ci-cd.yml.
-- APP_CORS_ALLOWED_ORIGINS_STAGING / APP_CORS_ALLOWED_ORIGINS_PRODUCTION are also defined as workflow env variables in .github/workflows/ci-cd.yml.
-- DESIRED_COUNT_* and TASK_CPU/TASK_MEMORY_* are also defined as workflow env variables with defaults.
+- APP_DATABASE_URL_STAGING / APP_DATABASE_URL_PRODUCTION are stored as GitHub Secrets.
+- APP_CORS_ALLOWED_ORIGINS_STAGING / APP_CORS_ALLOWED_ORIGINS_PRODUCTION are stored as GitHub Variables.
+- DESIRED_COUNT_* and TASK_CPU/TASK_MEMORY_* are stored as GitHub Variables.
 
 ## 3) Prerequisites
 
@@ -78,6 +78,8 @@ GitHub repository configuration required by pipeline:
   - AWS_SESSION_TOKEN
   - DOCKERHUB_TOKEN
   - SONAR_TOKEN
+  - APP_DATABASE_URL_STAGING
+  - APP_DATABASE_URL_PRODUCTION
 - Repository variables:
   - DOCKERHUB_USERNAME
   - SONAR_HOST_URL
@@ -85,6 +87,14 @@ GitHub repository configuration required by pipeline:
   - LAB_ROLE_ARN
   - VPC_ID
   - SUBNET_IDS
+  - APP_CORS_ALLOWED_ORIGINS_STAGING
+  - APP_CORS_ALLOWED_ORIGINS_PRODUCTION
+  - DESIRED_COUNT_STAGING (optional, default 1)
+  - DESIRED_COUNT_PRODUCTION (optional, default 1)
+  - TASK_CPU_STAGING (optional, default 256)
+  - TASK_MEMORY_STAGING (optional, default 512)
+  - TASK_CPU_PRODUCTION (optional, default 256)
+  - TASK_MEMORY_PRODUCTION (optional, default 512)
 
 Optional check commands:
 
@@ -106,8 +116,8 @@ Recommended usage:
 
 CI/CD strategy:
 - Terraform values are passed directly via -var arguments from GitHub vars/secrets.
-- APP_DATABASE_URL and APP_CORS_ALLOWED_ORIGINS for staging/production are passed from workflow env variables.
-- desired_count and task sizing values are passed from workflow env variables.
+- APP_DATABASE_URL for staging/production is passed from GitHub Secrets.
+- APP_CORS_ALLOWED_ORIGINS plus desired_count/task sizing are passed from GitHub Variables.
 - tfvars files are optional for local CLI usage only.
 
 Remote state keys used by CI/CD:
@@ -135,7 +145,6 @@ Edit both files and set real values:
 Current CI/CD behavior in this repository:
 - staging deployment reads all Terraform inputs from GitHub vars/secrets.
 - production deployment reads all Terraform inputs from GitHub vars/secrets.
-- backend DB URL and CORS values are sourced from workflow env variables.
 - docker_image_uri is always overridden by the image produced in build-test-publish.
 
 Important for CORS in AWS:
@@ -210,8 +219,8 @@ terraform -chdir=infra apply -auto-approve `
   -var="lab_role_arn=<github-var-LAB_ROLE_ARN>" `
   -var="vpc_id=<github-var-VPC_ID>" `
   -var="subnet_ids=<github-var-SUBNET_IDS-as-list>" `
-  -var="app_database_url=<workflow-env-APP_DATABASE_URL_STAGING>" `
-  -var="app_cors_allowed_origins=<workflow-env-APP_CORS_ALLOWED_ORIGINS_STAGING>"
+  -var="app_database_url=<github-secret-APP_DATABASE_URL_STAGING>" `
+  -var="app_cors_allowed_origins=<github-var-APP_CORS_ALLOWED_ORIGINS_STAGING>"
 ```
 
 ### Production
@@ -240,8 +249,8 @@ terraform -chdir=infra apply -auto-approve `
   -var="lab_role_arn=<github-var-LAB_ROLE_ARN>" `
   -var="vpc_id=<github-var-VPC_ID>" `
   -var="subnet_ids=<github-var-SUBNET_IDS-as-list>" `
-  -var="app_database_url=<workflow-env-APP_DATABASE_URL_PRODUCTION>" `
-  -var="app_cors_allowed_origins=<workflow-env-APP_CORS_ALLOWED_ORIGINS_PRODUCTION>"
+  -var="app_database_url=<github-secret-APP_DATABASE_URL_PRODUCTION>" `
+  -var="app_cors_allowed_origins=<github-var-APP_CORS_ALLOWED_ORIGINS_PRODUCTION>"
 ```
 
 ## 9) GitHub Actions deployment chain
@@ -345,7 +354,7 @@ terraform -chdir=infra destroy -var-file="production.tfvars"
 - App fails at startup:
   - Verify APP_DATABASE_URL points to a reachable database.
 - Deploy fails before apply:
-  - Verify required GitHub vars are defined and workflow env values are not empty for the target environment.
+  - Verify required GitHub Secrets/Variables are defined for the target environment.
 - ECS service does not reach steady state in update-service stages:
   - Inspect ECS service events and task stop reasons printed by workflow diagnostics.
 - Smoke test fails with no healthy targets:

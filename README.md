@@ -23,8 +23,6 @@ Servicio responsable de reglas de negocio, auditoría y agregación de métricas
 
 El workflow de backend en .github/workflows/ci-cd.yml usa variables y secretos de GitHub para pasar parámetros de Terraform en staging y producción.
 
-Para este proyecto, APP_DATABASE_URL y APP_CORS_ALLOWED_ORIGINS de staging/production se gestionan como variables de entorno dentro del mismo workflow (bloque top-level env en .github/workflows/ci-cd.yml).
-
 Variables requeridas:
 - DOCKERHUB_USERNAME
 - SONAR_HOST_URL
@@ -32,6 +30,14 @@ Variables requeridas:
 - LAB_ROLE_ARN
 - VPC_ID
 - SUBNET_IDS
+- APP_CORS_ALLOWED_ORIGINS_STAGING
+- APP_CORS_ALLOWED_ORIGINS_PRODUCTION
+- DESIRED_COUNT_STAGING (opcional)
+- DESIRED_COUNT_PRODUCTION (opcional)
+- TASK_CPU_STAGING (opcional)
+- TASK_MEMORY_STAGING (opcional)
+- TASK_CPU_PRODUCTION (opcional)
+- TASK_MEMORY_PRODUCTION (opcional)
 
 Secretos requeridos:
 - AWS_ACCESS_KEY_ID
@@ -39,6 +45,8 @@ Secretos requeridos:
 - AWS_SESSION_TOKEN
 - DOCKERHUB_TOKEN
 - SONAR_TOKEN
+- APP_DATABASE_URL_STAGING
+- APP_DATABASE_URL_PRODUCTION
 
 ## Ejecución local sin Docker
 
