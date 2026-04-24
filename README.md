@@ -19,6 +19,29 @@ Servicio responsable de reglas de negocio, auditoría y agregación de métricas
 - APP_CORS_ALLOWED_ORIGINS: orígenes permitidos para frontend local.
 - APP_DATABASE_URL: cadena de conexión SQLAlchemy.
 
+## Configuración CI/CD (GitHub Actions)
+
+El workflow de backend en .github/workflows/ci-cd.yml usa variables y secretos de GitHub para pasar parámetros de Terraform en staging y producción.
+
+Variables requeridas:
+- DOCKERHUB_USERNAME
+- SONAR_HOST_URL
+- TF_STATE_BUCKET
+- LAB_ROLE_ARN
+- VPC_ID
+- SUBNET_IDS
+- APP_CORS_ALLOWED_ORIGINS_STAGING
+- APP_CORS_ALLOWED_ORIGINS_PRODUCTION
+
+Secretos requeridos:
+- AWS_ACCESS_KEY_ID
+- AWS_SECRET_ACCESS_KEY
+- AWS_SESSION_TOKEN
+- DOCKERHUB_TOKEN
+- SONAR_TOKEN
+- APP_DATABASE_URL_STAGING
+- APP_DATABASE_URL_PRODUCTION
+
 ## Ejecución local sin Docker
 
 1. python -m venv .venv

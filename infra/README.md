@@ -31,7 +31,7 @@ Main files in this folder:
 - production.tfvars.example
 
 Pipeline file in repository root:
-- .github/workflows/ci.yml
+- .github/workflows/ci-cd.yml
 
 Reference-only demo files (do not modify):
 - demo_main.tf
@@ -52,8 +52,8 @@ Note:
 - APP_DATABASE_URL must point to an existing database managed outside this Terraform scope.
 
 Important implementation detail from this iteration:
-- CI/CD deployment uses tfvars files to provide APP_DATABASE_URL and APP_CORS_ALLOWED_ORIGINS.
-- The pipeline overrides only docker_image_uri dynamically from the build output.
+- CI/CD deployment uses GitHub variables and secrets for all Terraform input values.
+- The pipeline still overrides docker_image_uri dynamically from the build output.
 
 ## 3) Prerequisites
 
@@ -73,10 +73,23 @@ GitHub repository configuration required by pipeline:
   - AWS_SESSION_TOKEN
   - DOCKERHUB_TOKEN
   - SONAR_TOKEN
+  - APP_DATABASE_URL_STAGING
+  - APP_DATABASE_URL_PRODUCTION
 - Repository variables:
   - DOCKERHUB_USERNAME
   - SONAR_HOST_URL
   - TF_STATE_BUCKET
+  - LAB_ROLE_ARN
+  - VPC_ID
+  - SUBNET_IDS
+  - APP_CORS_ALLOWED_ORIGINS_STAGING
+  - APP_CORS_ALLOWED_ORIGINS_PRODUCTION
+  - DESIRED_COUNT_STAGING (optional, default 1)
+  - DESIRED_COUNT_PRODUCTION (optional, default 1)
+  - TASK_CPU_STAGING (optional, default 256)
+  - TASK_MEMORY_STAGING (optional, default 512)
+  - TASK_CPU_PRODUCTION (optional, default 256)
+  - TASK_MEMORY_PRODUCTION (optional, default 512)
 
 Optional check commands:
 
@@ -96,13 +109,17 @@ Recommended usage:
 - One tfvars file per environment
 - Different remote state key per environment
 
+CI/CD strategy:
+- Terraform values are passed directly via -var arguments from GitHub vars/secrets.
+- tfvars files are optional for local CLI usage only.
+
 Remote state keys used by CI/CD:
 - backend/staging/terraform.tfstate
 - backend/production/terraform.tfstate
 
 ## 5) Prepare environment files
 
-Create local tfvars files from examples:
+For local execution (optional), create tfvars files from examples:
 
 ```powershell
 Copy-Item infra/staging.tfvars.example infra/staging.tfvars
@@ -119,9 +136,8 @@ Edit both files and set real values:
 - desired_count
 
 Current CI/CD behavior in this repository:
-- staging deployment reads values from infra/staging.tfvars.
-- production deployment reads values from infra/production.tfvars.
-- if infra/production.tfvars is missing, production deploy fails fast with an explicit message.
+- staging deployment reads all Terraform inputs from GitHub vars/secrets.
+- production deployment reads all Terraform inputs from GitHub vars/secrets.
 - docker_image_uri is always overridden by the image produced in build-test-publish.
 
 Important for CORS in AWS:
@@ -190,8 +206,14 @@ CI/CD apply equivalent:
 
 ```powershell
 terraform -chdir=infra apply -auto-approve `
-  -var-file="staging.tfvars" `
-  -var="docker_image_uri=<image-from-build-stage>"
+  -var="environment_name=staging" `
+  -var="aws_region=us-east-1" `
+  -var="docker_image_uri=<image-from-build-stage>" `
+  -var="lab_role_arn=<github-var-LAB_ROLE_ARN>" `
+  -var="vpc_id=<github-var-VPC_ID>" `
+  -var="subnet_ids=<github-var-SUBNET_IDS-as-list>" `
+  -var="app_database_url=<github-secret-APP_DATABASE_URL_STAGING>" `
+  -var="app_cors_allowed_origins=<github-var-APP_CORS_ALLOWED_ORIGINS_STAGING>"
 ```
 
 ### Production
@@ -214,13 +236,19 @@ CI/CD apply equivalent:
 
 ```powershell
 terraform -chdir=infra apply -auto-approve `
-  -var-file="production.tfvars" `
-  -var="docker_image_uri=<image-from-build-stage>"
+  -var="environment_name=production" `
+  -var="aws_region=us-east-1" `
+  -var="docker_image_uri=<image-from-build-stage>" `
+  -var="lab_role_arn=<github-var-LAB_ROLE_ARN>" `
+  -var="vpc_id=<github-var-VPC_ID>" `
+  -var="subnet_ids=<github-var-SUBNET_IDS-as-list>" `
+  -var="app_database_url=<github-secret-APP_DATABASE_URL_PRODUCTION>" `
+  -var="app_cors_allowed_origins=<github-var-APP_CORS_ALLOWED_ORIGINS_PRODUCTION>"
 ```
 
 ## 9) GitHub Actions deployment chain
 
-The backend deployment workflow in .github/workflows/ci.yml runs this sequence on push to main:
+The backend deployment workflow in .github/workflows/ci-cd.yml runs this sequence on push to main:
 
 - build-test-publish
 - deploy-tf-staging
@@ -237,7 +265,7 @@ High-level behavior by stage:
   - emits image_uri output used by deploy jobs.
 - deploy-tf-staging:
   - terraform init with staging backend key.
-  - terraform apply using staging.tfvars and image_uri override.
+  - terraform apply using GitHub vars/secrets and image_uri override.
   - exports backend_alb_dns_name, backend_ecs_cluster_name, backend_ecs_service_name.
 - update-service-staging:
   - forces a new ECS deployment.
@@ -249,8 +277,7 @@ High-level behavior by stage:
   - waits for ALB target health.
   - calls GET /health and verifies response contains status ok.
 - deploy-tf-prod:
-  - same pattern as staging but with production backend key and production.tfvars.
-  - guarded by production.tfvars existence check.
+  - same pattern as staging but with production backend key and production vars/secrets.
 - update-service-prod:
   - same steady-state and diagnostics logic as staging.
 - smoke-test-prod:
@@ -292,6 +319,8 @@ terraform -chdir=infra apply "staging.tfplan"
 
 Repeat for production when ready.
 
+In CI/CD, only the Docker image changes between releases; infrastructure/runtime values are sourced from GitHub vars/secrets.
+
 ## 12) Destroy environment (if needed)
 
 Staging destroy:
@@ -317,9 +346,8 @@ terraform -chdir=infra destroy -var-file="production.tfvars"
   - Confirm health endpoint returns HTTP 200 on /health.
 - App fails at startup:
   - Verify APP_DATABASE_URL points to a reachable database.
-- Production deploy fails before apply:
-  - Ensure infra/production.tfvars exists.
-  - Create it from infra/production.tfvars.example and set real values.
+- Deploy fails before apply:
+  - Verify required GitHub vars/secrets are defined for the target environment.
 - ECS service does not reach steady state in update-service stages:
   - Inspect ECS service events and task stop reasons printed by workflow diagnostics.
 - Smoke test fails with no healthy targets:
