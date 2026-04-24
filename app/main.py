@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from contextlib import asynccontextmanager
 
@@ -12,7 +13,27 @@ from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
 from app.models.domain import User, UserRole
 
-allowed_origins = [origin.strip() for origin in settings.cors_allowed_origins.split(",") if origin.strip()]
+logger = logging.getLogger("uvicorn.error")
+
+
+def _parse_allowed_origins(raw_origins: str) -> list[str]:
+    cleaned_value = raw_origins.strip()
+    if cleaned_value == "*":
+        return ["*"]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for origin in cleaned_value.split(","):
+        candidate = origin.strip().rstrip("/")
+        if not candidate or candidate in seen:
+            continue
+        normalized.append(candidate)
+        seen.add(candidate)
+
+    return normalized
+
+
+allowed_origins = _parse_allowed_origins(settings.cors_allowed_origins)
 
 
 def _hash_password(raw_password: str) -> str:
@@ -47,6 +68,7 @@ def seed_demo_users() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     seed_demo_users()
+    logger.info("CORS allowed origins: %s", allowed_origins)
     yield
 
 

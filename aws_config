@@ -1,0 +1,80 @@
+Abrir módulo y ejecutar laboratorio
+Copiar información de CLI
+Pegar información de CLI en archivo .aws/credentials en el perfil [curso_cicd]
+Ejecutar "aws configure --profile curso_cicd"
+Enter en los valores que ya existan. Configurar los que falten: Formato JSON y región us-east-1
+Dando clic en el botón de AWS (el que tiene el ícono verde) se abre la consola de AWS.
+
+
+Configurar los secretos y variables en GitHub.
+ - obtener el Arn del labrole: arn:aws:iam::855240645828:role/LabRole
+ - obtener el id de la VPC: vpc-024fd22712bbaf826
+  - obtener el id de la subred: subnet-0b9ace78ab74141df y subnet-0abf9bdd82901012b
++ AWS_ACCESS_KEY_ID
++ AWS_SECRET_ACCESS_KEY
++ AWS_SESSION_TOKEN
+- LAB_ROLE_ARN
+- VPC_ID
+- SUBNET_IDS (valores separados por coma)
+- TF_STATE_BUCKET: curso-cicd-tfstate-jdgut-753159
+
+Crear el S3 bucket para Terraform state: curso-cicd-tfstate-jdgut-753159
+aws --profile curso_cicd s3api create-bucket `
+  --bucket curso-cicd-tfstate-jdgut-753159 `
+  --region us-east-1
+
+aws --profile curso_cicd s3api put-bucket-versioning `
+  --bucket curso-cicd-tfstate-jdgut-753159 `
+  --versioning-configuration Status=Enabled
+  
+aws --profile curso_cicd s3api put-bucket-encryption `
+  --bucket curso-cicd-tfstate-jdgut-753159 `
+  --server-side-encryption-configuration '{ 
+    "Rules": [{
+      "ApplyServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "AES256"
+      }
+    }]
+  }'
+
+aws --profile curso_cicd s3api put-public-access-block `
+  --bucket curso-cicd-tfstate-jdgut-753159 `
+  --public-access-block-configuration '{
+    "BlockPublicAcls": true,
+    "IgnorePublicAcls": true,
+    "BlockPublicPolicy": true,
+    "RestrictPublicBuckets": true
+  }'
+
+aws --profile curso_cicd dynamodb create-table `
+  --table-name terraform-state-locks `
+  --attribute-definitions AttributeName=LockID,AttributeType=S `
+  --key-schema AttributeName=LockID,KeyType=HASH `
+  --billing-mode PAY_PER_REQUEST `
+  --region us-east-1
+
+
+$Env:AWS_PROFILE = "curso_cicd"
+$Env:AWS_DEFAULT_REGION = "us-east-1"
+
+terraform -chdir=infra init `
+  -backend-config="profile=curso_cicd" `
+  -backend-config="bucket=curso-cicd-tfstate-jdgut-753159" `
+  -backend-config="key=backend/staging/terraform.tfstate" `
+  -backend-config="region=us-east-1" `
+  -backend-config="dynamodb_table=terraform-state-locks"
+
+terraform -chdir=infra workspace show
+
+terraform -chdir=infra plan `
+    -var-file="staging.tfvars" `
+    -out="staging.tfplan"
+
+terraform -chdir=infra apply `
+    "staging.tfplan"
+
+
+terraform -chdir=infra destroy `
+    -var-file="staging.tfvars" `
+    -out="staging.tfplan"
+

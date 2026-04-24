@@ -1,0 +1,19 @@
+environment_name = "staging"
+
+# Imagen sugerida por flujo CI/CD para development
+docker_image_uri = "<dockerhub-username>/<repo>:dev"
+
+# Reusar valores existentes en tu cuenta/lab
+lab_role_arn = "arn:aws:iam::<account-id>:role/LabRole"
+vpc_id       = "vpc-xxxxxxxx"
+subnet_ids   = ["subnet-aaaaaaaa", "subnet-bbbbbbbb"]
+
+aws_region = "us-east-1"
+
+# BD fuera de alcance en esta iteracion: proveer URL externa o existente
+app_database_url = "postgresql+psycopg://postgres:postgres@cicd-db:5432/movilidad"
+
+# Origen(es) permitidos para CORS en staging (separados por coma, sin slash final)
+app_cors_allowed_origins = "https://staging-frontend.example.com,http://localhost:5173"
+
+desired_count = 1
