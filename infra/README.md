@@ -55,6 +55,11 @@ Important implementation detail from this iteration:
 - CI/CD deployment uses GitHub variables and secrets for all Terraform input values.
 - The pipeline still overrides docker_image_uri dynamically from the build output.
 
+Current setting choice for backend runtime connection values:
+- APP_DATABASE_URL_STAGING / APP_DATABASE_URL_PRODUCTION are stored as GitHub Secrets.
+- APP_CORS_ALLOWED_ORIGINS_STAGING / APP_CORS_ALLOWED_ORIGINS_PRODUCTION are stored as GitHub Variables.
+- DESIRED_COUNT_* and TASK_CPU/TASK_MEMORY_* are stored as GitHub Variables.
+
 ## 3) Prerequisites
 
 - Terraform 1.6+ installed and available in PATH
@@ -111,6 +116,8 @@ Recommended usage:
 
 CI/CD strategy:
 - Terraform values are passed directly via -var arguments from GitHub vars/secrets.
+- APP_DATABASE_URL for staging/production is passed from GitHub Secrets.
+- APP_CORS_ALLOWED_ORIGINS plus desired_count/task sizing are passed from GitHub Variables.
 - tfvars files are optional for local CLI usage only.
 
 Remote state keys used by CI/CD:
@@ -347,7 +354,7 @@ terraform -chdir=infra destroy -var-file="production.tfvars"
 - App fails at startup:
   - Verify APP_DATABASE_URL points to a reachable database.
 - Deploy fails before apply:
-  - Verify required GitHub vars/secrets are defined for the target environment.
+  - Verify required GitHub Secrets/Variables are defined for the target environment.
 - ECS service does not reach steady state in update-service stages:
   - Inspect ECS service events and task stop reasons printed by workflow diagnostics.
 - Smoke test fails with no healthy targets:

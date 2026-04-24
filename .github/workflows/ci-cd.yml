@@ -202,7 +202,7 @@ jobs:
           terraform apply -auto-approve \
             -var="environment_name=staging" \
             -var="aws_region=us-east-1" \
-            -var="docker_image_uri=${IMAGE_URI}"
+            -var="docker_image_uri=${IMAGE_URI}" \
             -var="lab_role_arn=${LAB_ROLE_ARN}" \
             -var="vpc_id=${VPC_ID}" \
             -var="subnet_ids=${SUBNET_LIST}" \
@@ -469,7 +469,7 @@ jobs:
           terraform apply -auto-approve \
             -var="environment_name=production" \
             -var="aws_region=us-east-1" \
-            -var="docker_image_uri=${IMAGE_URI}"
+            -var="docker_image_uri=${IMAGE_URI}" \
             -var="lab_role_arn=${LAB_ROLE_ARN}" \
             -var="vpc_id=${VPC_ID}" \
             -var="subnet_ids=${SUBNET_LIST}" \
