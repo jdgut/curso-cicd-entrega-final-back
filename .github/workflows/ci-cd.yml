@@ -9,6 +9,27 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Environment to operate on (destroy/unlock)"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+          - all
+      confirm_destroy:
+        description: "Type DESTROY to confirm"
+        required: false
+        type: string
+      confirm_unlock:
+        description: "Type UNLOCK to remove Terraform state lock"
+        required: false
+        type: string
+      lock_id:
+        description: "Optional lock ID (from Terraform error) to guard unlock"
+        required: false
+        type: string
 
 jobs:
   build-test-publish:
@@ -576,3 +597,138 @@ jobs:
           [ "$RUNNING" -eq "$DESIRED" ] || (echo "Running count does not match desired count" && exit 1)
           [ "$DEPLOYED_IMAGE" = "$EXPECTED_IMAGE" ] || (echo "Production is not running expected image" && exit 1)
           echo "$HEALTH_RESPONSE" | grep -q '"status":"ok"'
+
+  cleanup-environment:
+    name: Manual Cleanup (Terraform Destroy)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_destroy == 'DESTROY'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+          terraform_wrapper: false
+
+      - name: Run Terraform Destroy (selected environment)
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.target_environment }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$TARGET_ENVIRONMENT" == "all" ]]; then
+            ENVIRONMENTS=("staging" "production")
+          else
+            ENVIRONMENTS=("$TARGET_ENVIRONMENT")
+          fi
+
+          for ENV_NAME in "${ENVIRONMENTS[@]}"; do
+            if [[ "$ENV_NAME" == "staging" ]]; then
+              BACKEND_KEY="backend/staging/terraform.tfstate"
+              VAR_FILE="staging.tfvars"
+            else
+              BACKEND_KEY="backend/production/terraform.tfstate"
+              VAR_FILE="production.tfvars"
+            fi
+
+            if [[ ! -f "infra/${VAR_FILE}" ]]; then
+              echo "Missing infra/${VAR_FILE}. Cannot destroy ${ENV_NAME} safely."
+              exit 1
+            fi
+
+            echo "Starting destroy for environment: $ENV_NAME"
+
+            terraform -chdir=infra init -reconfigure \
+              -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+              -backend-config="key=${BACKEND_KEY}" \
+              -backend-config="region=us-east-1" \
+              -backend-config="dynamodb_table=terraform-state-locks"
+
+            terraform -chdir=infra destroy -auto-approve -lock-timeout=10m \
+              -var-file="${VAR_FILE}"
+
+            echo "Destroy completed for environment: $ENV_NAME"
+          done
+
+  unlock-state:
+    name: Manual Unlock (Terraform State Lock)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_unlock == 'UNLOCK'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Remove Terraform lock item (selected environment)
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.target_environment }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          LOCK_ID: ${{ github.event.inputs.lock_id }}
+        run: |
+          set -euo pipefail
+
+          TABLE_NAME="terraform-state-locks"
+
+          if [[ -n "${LOCK_ID:-}" ]]; then
+            echo "Using guarded unlock with lock ID: ${LOCK_ID}"
+          else
+            echo "No lock_id provided. Unlock will delete existing lock item by path only."
+          fi
+
+          if [[ "$TARGET_ENVIRONMENT" == "all" ]]; then
+            ENVIRONMENTS=("staging" "production")
+          else
+            ENVIRONMENTS=("$TARGET_ENVIRONMENT")
+          fi
+
+          for ENV_NAME in "${ENVIRONMENTS[@]}"; do
+            if [[ "$ENV_NAME" == "staging" ]]; then
+              BACKEND_KEY="backend/staging/terraform.tfstate"
+            else
+              BACKEND_KEY="backend/production/terraform.tfstate"
+            fi
+
+            LOCK_PATH="${TF_STATE_BUCKET}/${BACKEND_KEY}"
+            KEY_JSON=$(printf '{"LockID":{"S":"%s"}}' "$LOCK_PATH")
+
+            echo "Checking lock item for: $LOCK_PATH"
+            aws dynamodb get-item \
+              --table-name "$TABLE_NAME" \
+              --key "$KEY_JSON" \
+              --consistent-read \
+              --output json
+
+            if [[ -n "${LOCK_ID:-}" ]]; then
+              VALUE_JSON=$(printf '{":id":{"S":"%s"}}' "$LOCK_ID")
+              aws dynamodb delete-item \
+                --table-name "$TABLE_NAME" \
+                --key "$KEY_JSON" \
+                --condition-expression 'attribute_exists(LockID) AND contains(Info, :id)' \
+                --expression-attribute-values "$VALUE_JSON"
+            else
+              aws dynamodb delete-item \
+                --table-name "$TABLE_NAME" \
+                --key "$KEY_JSON" \
+                --condition-expression 'attribute_exists(LockID)'
+            fi
+
+            echo "Lock removed for: $LOCK_PATH"
+          done
